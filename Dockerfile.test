@@ -1,0 +1,28 @@
+# UFPS Installation Testing Container
+# Provides clean environment for testing installation
+
+FROM python:3.9-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    curl \
+    ffmpeg \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user (avoid running as root)
+RUN useradd -m -s /bin/bash testuser
+USER testuser
+WORKDIR /home/testuser
+
+# Copy UFPS source
+COPY --chown=testuser:testuser . /home/testuser/ufps/
+
+# Set up environment
+ENV PATH="/home/testuser/.local/bin:${PATH}"
+
+# Entry point for testing
+WORKDIR /home/testuser/ufps
+CMD ["python3", "test_install.py", "--verbose"]
