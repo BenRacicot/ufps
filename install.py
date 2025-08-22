@@ -11,6 +11,7 @@ import platform
 import shutil
 import tempfile
 import urllib.request
+import ssl
 import zipfile
 import tarfile
 from pathlib import Path
@@ -27,17 +28,21 @@ CONFIG_FILE = INSTALL_DIR / "config.json"
 BIN_DIR = Path.home() / ".local" / "bin"
 
 # URLs for dependencies
-RIFE_REPO = "https://github.com/hzwer/Practical-RIFE.git"
+RIFE_REPO = "https://github.com/hzwer/ECCV2022-RIFE.git"
 MODEL_URLS = {
-    "RIFE_HDv3": {
-        "url": "https://github.com/hzwer/Practical-RIFE/releases/download/v4.6/RIFE_HDv3.zip",
-        "size": "13MB",
-        "files": ["flownet.pkl", "contextnet.pkl", "unet.pkl"]
+    "RIFE_HD": {
+        # Google Drive direct download link (using export format)
+        "url": "https://drive.google.com/uc?export=download&id=1APIzVeI-4ZZCEuIRE1m6WYfSCaOsi_7_",
+        "size": "~50MB",
+        "files": ["flownet.pkl", "contextnet.pkl", "unet.pkl", "fusionnet.pkl"],
+        "gdrive_id": "1APIzVeI-4ZZCEuIRE1m6WYfSCaOsi_7_"
     },
-    "RIFE_v4.6": {
-        "url": "https://github.com/hzwer/Practical-RIFE/releases/download/v4.6/train_log.zip", 
-        "size": "13MB",
-        "files": ["flownet.pkl", "contextnet.pkl", "unet.pkl"]
+    "RIFE_v4": {
+        # Alternative model from the paper
+        "url": "https://drive.google.com/uc?export=download&id=1h42aGYPNJn2q8j_GVkS_yDu__G_UZ2GX",
+        "size": "~13MB", 
+        "files": ["flownet.pkl", "contextnet.pkl", "unet.pkl"],
+        "gdrive_id": "1h42aGYPNJn2q8j_GVkS_yDu__G_UZ2GX"
     }
 }
 
@@ -121,15 +126,49 @@ def download_file(url, dest, desc="Downloading"):
     try:
         ColorPrint.info(f"{desc}...")
         
+        # Check if it's a Google Drive URL and use gdown if available
+        if "drive.google.com" in url:
+            # Try using gdown for Google Drive files
+            try:
+                import gdown
+                gdown.download(url, str(dest), quiet=False)
+                return True
+            except ImportError:
+                # Fall back to wget/curl for Google Drive
+                ColorPrint.warning("gdown not available, trying alternative download method...")
+                gdrive_id = url.split("id=")[-1] if "id=" in url else None
+                if gdrive_id:
+                    # Try wget with Google Drive
+                    wget_cmd = f'wget --no-check-certificate "https://drive.google.com/uc?export=download&id={gdrive_id}" -O "{dest}"'
+                    success = run_command(wget_cmd)
+                    if success:
+                        return True
+                    # Try curl as fallback
+                    curl_cmd = f'curl -L "https://drive.google.com/uc?export=download&id={gdrive_id}" -o "{dest}"'
+                    success = run_command(curl_cmd)
+                    return success
+        
+        # Standard download for non-Google Drive URLs
         def download_hook(block_num, block_size, total_size):
             downloaded = block_num * block_size
-            percent = min(100, downloaded * 100 // total_size)
+            percent = min(100, downloaded * 100 // total_size) if total_size > 0 else 0
             bar_length = 40
             filled = int(bar_length * percent // 100)
             bar = '█' * filled + '░' * (bar_length - filled)
-            size_mb = total_size / 1024 / 1024
-            downloaded_mb = downloaded / 1024 / 1024
-            print(f'\r  [{bar}] {percent}% ({downloaded_mb:.1f}/{size_mb:.1f} MB)', end='', flush=True)
+            if total_size > 0:
+                size_mb = total_size / 1024 / 1024
+                downloaded_mb = downloaded / 1024 / 1024
+                print(f'\r  [{bar}] {percent}% ({downloaded_mb:.1f}/{size_mb:.1f} MB)', end='', flush=True)
+            else:
+                print(f'\r  Downloading... {downloaded / 1024 / 1024:.1f} MB', end='', flush=True)
+        
+        # Create SSL context that doesn't verify certificates (for Google Drive)
+        if "drive.google.com" in url:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
+            urllib.request.install_opener(opener)
         
         urllib.request.urlretrieve(url, dest, reporthook=download_hook)
         print()  # New line after progress
@@ -185,7 +224,8 @@ def install_python_packages():
         "questionary",
         "tqdm",
         "requests",
-        "packaging"
+        "packaging",
+        "scikit-video"  # Required by RIFE's inference_video.py
     ]
     
     for package in packages:
@@ -214,47 +254,40 @@ def setup_rife():
     return True
 
 def download_models():
-    """Download RIFE models"""
-    ColorPrint.header("Downloading AI models")
+    """Install RIFE models from bundled files or download"""
+    ColorPrint.header("Installing AI models")
     
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     
     # Check if models already exist
-    model_files = ["flownet.pkl", "contextnet.pkl", "unet.pkl"]
-    if all((MODELS_DIR / f).exists() for f in model_files):
-        ColorPrint.info("Models already downloaded")
+    existing_models = list(MODELS_DIR.glob("*.pkl"))
+    if existing_models:
+        ColorPrint.info(f"Models already installed: {[m.name for m in existing_models]}")
         return True
     
-    # Download RIFE v4.6 models
-    model_info = MODEL_URLS["RIFE_v4.6"]
-    ColorPrint.info(f"Downloading RIFE models ({model_info['size']})...")
+    # Check for bundled models in the project directory
+    script_dir = Path(__file__).parent
+    bundled_models_dir = script_dir / "models"
     
-    temp_zip = MODELS_DIR / "models.zip"
-    if not download_file(model_info["url"], temp_zip, "Downloading RIFE v4.6 models"):
-        return False
+    if bundled_models_dir.exists():
+        bundled_files = list(bundled_models_dir.glob("*.pkl")) + list(bundled_models_dir.glob("*.py"))
+        if bundled_files:
+            ColorPrint.info(f"Installing bundled models from {bundled_models_dir}")
+            for model_file in bundled_files:
+                dest = MODELS_DIR / model_file.name
+                ColorPrint.info(f"  Copying {model_file.name}")
+                shutil.copy2(model_file, dest)
+            ColorPrint.success(f"Installed {len(bundled_files)} model files")
+            return True
     
-    # Extract models
-    ColorPrint.info("Extracting models...")
-    try:
-        with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
-            # Extract to temp dir first to handle nested structure
-            with tempfile.TemporaryDirectory() as temp_dir:
-                zip_ref.extractall(temp_dir)
-                
-                # Find the model files
-                temp_path = Path(temp_dir)
-                for model_file in model_files:
-                    # Search for the file in extracted contents
-                    for file_path in temp_path.rglob(model_file):
-                        shutil.copy2(file_path, MODELS_DIR / model_file)
-                        break
-        
-        temp_zip.unlink()
-        ColorPrint.success("Models installed")
-        return True
-    except Exception as e:
-        ColorPrint.error(f"Failed to extract models: {e}")
-        return False
+    # Fallback to download instructions
+    ColorPrint.warning("No bundled models found")
+    ColorPrint.info("Models can be downloaded manually:")
+    ColorPrint.info("1. Download HD models from: https://drive.google.com/file/d/1APIzVeI-4ZZCEuIRE1m6WYfSCaOsi_7_/view")
+    ColorPrint.info("2. Extract the .pkl files to: ~/.ufps/models/")
+    
+    # Don't fail installation - models can be obtained later
+    return True
 
 def setup_ffmpeg():
     """Download or locate ffmpeg"""

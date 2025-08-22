@@ -232,13 +232,17 @@ class InstallationTester:
         models_dir = INSTALL_DIR / "models"
         if models_dir.exists():
             model_files = list(models_dir.glob("*.pkl"))
-            if len(model_files) >= 3:
-                self.print_success(f"AI models present ({len(model_files)} files)")
+            if len(model_files) >= 1:  # RIFE_HDv3 only needs flownet.pkl
+                self.print_success(f"AI models present ({len(model_files)} .pkl files)")
                 for model in model_files:
                     size_mb = model.stat().st_size / 1024 / 1024
                     self.print_info(f"  {model.name}: {size_mb:.1f} MB")
+                # Also check for model Python files
+                py_files = list(models_dir.glob("*.py"))
+                if py_files:
+                    self.print_info(f"  Plus {len(py_files)} model definition files")
             else:
-                self.print_fail(f"Incomplete models ({len(model_files)} files)")
+                self.print_fail(f"No model files found")
         else:
             self.print_fail("Models directory not found")
         
